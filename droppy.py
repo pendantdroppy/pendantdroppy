@@ -25,6 +25,12 @@ try:
 except ImportError:
     raise SystemExit("PyQt6 is required. Install with: pip install PyQt6")
 
+global user
+
+try:
+    user = os.environ['USER']
+except error:
+    user =  os.getenv('USERNAME')
 
 @dataclass
 class Inputs:
@@ -1189,7 +1195,7 @@ class MainWindow(QMainWindow):
     
     def on_save_settings(self):
         """Save current settings to droppy.conf file."""
-        outdir = "~/.droppy/"
+        outdir = "/home/"+user+"/.droppy/"
         if not outdir:
             QMessageBox.warning(self, "Error", "Please specify an output directory first")
             return
@@ -1232,8 +1238,8 @@ class MainWindow(QMainWindow):
     
     def load_settings(self):
         """Load settings from droppy.conf if it exists, otherwise use defaults."""
-        settings_outdir = "~/.droppy/"
-        default_outdir = "~/.droppy/droplet_out"
+        settings_outdir = "/home/"+user+"/.droppy/"
+        default_outdir = "/home/"+user+"/.droppy/droplet_out"
         conf_path = os.path.join(settings_outdir, "droppy.conf")
         
         if os.path.exists(conf_path):
