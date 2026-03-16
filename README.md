@@ -55,13 +55,10 @@ python droppy.py
 1. **Select Image** - Browse for droplet image (PNG, JPG, etc.)
 2. **Draw Geometry** - Interactive cv2 window to define:
    - ROI (Region of Interest)
-   - Needle line (for diameter calibration)
+   - Needle tip (for diameter calibration)
 3. **Configure Parameters** - Adjust processing and analysis settings across tabs
 4. **Save Settings** - Button to save current configuration to `droppy.conf`
-5. **Run Analysis** - Click "RUN ANALYSIS" to:
-   - Run low clarity fit
-   - Run high clarity fit
-   - Average Bond numbers
+5. **Run Analysis** - Click "RUN ANALYSIS"
 6. **View Results** - See overlaid YL curve, plateau points, and extrema
 
 ### Settings File
@@ -94,7 +91,7 @@ Analysis generates:
 ## Parameters Explained
 
 ### Image Processing
-- **Blur Sigma** - Gaussian blur for noise reduction
+- **Blur Sigma** - Gaussian blur level for edge detection resolution
 - **Canny Low/High** - Edge detection thresholds
 
 ### Contour Analysis
@@ -103,16 +100,10 @@ Analysis generates:
 - **Min r', z'** - Minimum thresholds to avoid numerical blowup
 
 ### Analysis
-- **Plateau Width** - Number of points centered on equator
-- **Lensing Factor** - Optical correction (1.0 = no correction)
-- **Clarity Ratios** - Window fractions for low/high clarity runs
-- **Bo Wiggle Room** - Expansion of Bond number search range
-
-## Visualization Colors
-
-- **Red** - Young-Laplace theoretical curve (averaged Bond number)
-- **Yellow** - Plateau region (fitting region around equator)
-- **Grey** - Extrema points (tip, center, left, right)
+- **Plateau Width** - Number of points centered on equator with lowest variance
+- **Lensing Factor** - Optical correction (1.0 = no correction, <1 = correnting horizontal stretching, >1 = correcting vertical stretching)
+- **Clarity Ratios** - Fractions of points used for low/high clarity image smoothing 
+- **Bo Wiggle Room** - Expansion of Bond number search range from pointwise estimates
 
 
 ## Troubleshooting
@@ -124,6 +115,8 @@ Analysis generates:
 **Config not loading** - Check `droppy.conf` is valid JSON in output directory
 
 **"The YL curve is visually off"** - Use an image with sharp edges and a known IFT for your setup, keep all settings standard and adjust lensing factor until it fits. Use that lensing factor for all the other runs with your setup. If you are already doing that, increase sigma until it aligns.
+
+More detailed manuals in the works :) open issue if help is needed.
 
 
 ## Contributing
@@ -142,8 +135,4 @@ For issues, feature requests, or questions:
 
 ## Acknowledgments
 
-Based on Young-Laplace equation analysis for axisymmetric droplets.
-
-References:
-- Bashforth, F., & Adams, J. C. (1883). "An attempt to test the theories of capillary action"
-- Rotenberg, Y., Boruvka, L., & Neumann, A. W. (1983). "Determination of surface tension and contact angle from the shapes of axisymmetric fluid interfaces"
+Inspired by Krystyna Prochaska's work in interfacial tensiometry and absorption.
