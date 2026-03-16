@@ -1,3 +1,6 @@
+<img width="250" height="250" alt="droppy_logo_og" src="https://github.com/user-attachments/assets/e995bf4b-2346-49fd-9c93-9ec10889ec1b" />
+
+
 # pendantdroppy - Tensiometry Analysis Software
 
 A PyQt6-based GUI application for analyzing droplet shape using Young-Laplace equation fitting and Bond number calculation.
