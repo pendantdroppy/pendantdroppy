@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tensiometry Software - PyQt6 GUI Edition (FIXED)
-Matches original CLI code exactly for pipeline and analysis.
-"""
-
 from __future__ import annotations
 import sys
 import json
