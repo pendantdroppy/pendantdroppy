@@ -118,8 +118,12 @@ Analysis generates:
 ## Troubleshooting
 
 **"No contours found"** - Adjust Canny thresholds or sigma
+
 **"Bo ~0 for rising droplets"** - Ensure plateau is centered on equator, edit sigma, or redraw needle line, it honestly can be pixels in it.
+
 **Config not loading** - Check `droppy.conf` is valid JSON in output directory
+
+**"The YL curve is visually off"** - Use an image with sharp edges and a known IFT for your setup, keep all settings standard and adjust lensing factor until it fits. Use that lensing factor for all the other runs with your setup. If you are already doing that, increase sigma until it aligns.
 
 
 ## Contributing
