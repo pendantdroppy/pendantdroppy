@@ -11,14 +11,14 @@ A PyQt6-based GUI application for analyzing droplet shape using Young-Laplace eq
 
 ### From PyPI
 ```bash
-pip install droppy
+pip install pendantdroppy
 ```
 
 ### From Source
 ```bash
 # Clone the repository
 git clone https://github.com/pendantdroppy/pendantdroppy.git
-cd droppy
+cd pendantdroppy
 
 # Install in development mode
 pip install -e .
