@@ -9,12 +9,12 @@ with open("README.md", "r", encoding="utf-8") as fh:
 def create_desktop_file():
     """Create a .desktop file for Linux applications menu."""
     desktop_content = """[Desktop Entry]
-Version=1.0
+Version=1.0.3
 Type=Application
 Name=droppy
 Comment=Tensiometry software for droplet shape analysis
 Exec=droppy
-Icon=droppy
+Icon=droppy.png
 Terminal=false
 Categories=Science;Physics;
 Keywords=droplet;tensiometry;analysis;young-laplace;pendant;
@@ -40,7 +40,7 @@ Keywords=droplet;tensiometry;analysis;young-laplace;pendant;
 
 setup(
     name="pendantdroppy",
-    version="1.0.0",
+    version="1.0.3",
     author="Josh",
     author_email="c0cz89m5t@mozmail.com",
     description="pendantdroppy - Tensiometry software for droplet shape analysis using Young-Laplace fitting",
