@@ -9,7 +9,7 @@ A PyQt6-based GUI application for analyzing droplet shape using Young-Laplace eq
 - Python 3.8 or higher
 - pip (Python package manager)
 
-### From PyPI (once published)
+### From PyPI
 ```bash
 pip install droppy
 ```
