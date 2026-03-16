@@ -1194,7 +1194,7 @@ class MainWindow(QMainWindow):
     def on_help(self):
         """Open GitHub documentation."""
         import webbrowser
-        webbrowser.open("https://github.com/your-username/tensiometry-docs")  # Placeholder URL
+        webbrowser.open("https://github.com/pendantdroppy/pendantdroppy")
     
     def on_save_settings(self):
         """Save current settings to droppy.conf file."""
