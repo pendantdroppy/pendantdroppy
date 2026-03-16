@@ -50,7 +50,7 @@ class Inputs:
 
 
 # ============================================================
-# All utility functions from original code
+# Utilities
 # ============================================================
 def rot90(v: np.ndarray) -> np.ndarray:
     return np.array([-v[1], v[0]], dtype=np.float64)
@@ -567,7 +567,6 @@ class ProcessingThread(QThread):
                     "plateau_length": int(np.count_nonzero(plateau_mask)),
                 }
             
-            # RUN DUAL CLARITY - EXACTLY LIKE ORIGINAL
             self.progress.emit("Running low clarity analysis...")
             W_low = max(1, int(round(float(self.ui_params["low_clarity_ratio"]) * M)))
             result_low = run_pipeline(W_low, lensing_factor)
@@ -583,7 +582,6 @@ class ProcessingThread(QThread):
             Bo_high = float(result_high["best_Bo"])
             Bo_final = 0.5 * (Bo_low + Bo_high)
             
-            # Use HIGH clarity result for everything, but average the Bo
             best = result_high
             
             self.finished.emit({
@@ -654,7 +652,6 @@ class MainWindow(QMainWindow):
         self.run_btn.clicked.connect(self.on_run_analysis)
         self.run_btn.setEnabled(False)
         
-        # Save settings button - classic 3D tkinter style
         save_settings_btn = QPushButton(" Save Settings ")
         save_settings_btn.setMaximumWidth(120)
         save_settings_btn.setMaximumHeight(25)
@@ -692,7 +689,6 @@ class MainWindow(QMainWindow):
         run_layout.addWidget(self.run_btn)
         run_layout.addStretch()
         
-        # Help button - classic 3D tkinter style, light grey
         help_btn = QPushButton("?")
         help_btn.setMaximumWidth(25)
         help_btn.setMaximumHeight(25)
@@ -1240,7 +1236,6 @@ class MainWindow(QMainWindow):
         default_outdir = "droplet_out"
         conf_path = os.path.join(settings_outdir, "droppy.conf")
         
-        # Try to load from droplet_out/droppy.conf
         if os.path.exists(conf_path):
             try:
                 with open(conf_path, "r") as f:
