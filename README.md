@@ -86,7 +86,6 @@ Analysis generates:
 - `result_yl_overlay.png` - Young-Laplace curve fitted to droplet
 - `edges.png` - Edge detection result
 - `summary.json` - Numerical results (Bond numbers, calibration)
-- `droplet_edge_results.csv` - Detailed point-by-point analysis
 
 ## Parameters Explained
 
