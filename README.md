@@ -65,7 +65,7 @@ python droppy.py
 6. **View Results** - See overlaid YL curve, plateau points, and extrema
 
 ### Settings File
-Configuration is automatically saved to `droplet_out/droppy.conf`. 
+Configuration is automatically saved to `droppy.conf`. 
 
 On startup, the program loads from this file if it exists, otherwise uses defaults.
 
