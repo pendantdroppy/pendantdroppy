@@ -2,15 +2,6 @@
 
 A PyQt6-based GUI application for analyzing droplet shape using Young-Laplace equation fitting and Bond number calculation.
 
-## Features
-
-- **Interactive Geometry Selection** - cv2-based ROI and needle line drawing
-- **Dual Clarity Analysis** - Runs low and high clarity fits, averages Bond number
-- **Young-Laplace Fitting** - Theoretical curve matching with lensing correction
-- **Configuration Saving** - Save/load analysis settings to `droppy.conf`
-- **Visual Results** - YL curve overlay with plateau region highlighting
-- **Comprehensive Output** - JSON summary, CSV data, PNG visualizations
-- **Desktop Integration** - Automatic .desktop file creation on Linux
 
 ## Installation
 
