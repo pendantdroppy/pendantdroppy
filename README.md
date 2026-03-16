@@ -2,15 +2,6 @@
 
 A PyQt6-based GUI application for analyzing droplet shape using Young-Laplace equation fitting and Bond number calculation.
 
-## Features
-
-- **Interactive Geometry Selection** - cv2-based ROI and needle line drawing
-- **Dual Clarity Analysis** - Runs low and high clarity fits, averages Bond number
-- **Young-Laplace Fitting** - Theoretical curve matching with lensing correction
-- **Configuration Saving** - Save/load analysis settings to `droppy.conf`
-- **Visual Results** - YL curve overlay with plateau region highlighting
-- **Comprehensive Output** - JSON summary, CSV data, PNG visualizations
-- **Desktop Integration** - Automatic .desktop file creation on Linux
 
 ## Installation
 
@@ -120,34 +111,13 @@ Analysis generates:
 - **Yellow** - Plateau region (fitting region around equator)
 - **Grey** - Extrema points (tip, center, left, right)
 
-## System Requirements
-
-- Windows, macOS, or Linux
-- 4GB RAM minimum
-- OpenCV, PyQt6, NumPy
 
 ## Troubleshooting
 
 **"No contours found"** - Adjust Canny thresholds or sigma
-**"Bo ~0 for rising droplets"** - Ensure plateau is centered on equator; check lensing factor
+**"Bo ~0 for rising droplets"** - Ensure plateau is centered on equator, edit sigma, or redraw needle line, it honestly can be pixels in it.
 **Config not loading** - Check `droppy.conf` is valid JSON in output directory
 
-## License
-
-MIT License - see LICENSE file
-
-## Citation
-
-If you use this software in research, please cite:
-
-```bibtex
-@software{droppy2024,
-  title={dropPy - Tensiometry Analysis Software},
-  author={Josh},
-  year={2024},
-  url={https://github.com/pendantdroppy/pendantdroppy}
-}
-```
 
 ## Contributing
 
