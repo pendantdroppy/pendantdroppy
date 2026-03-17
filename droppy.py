@@ -447,6 +447,10 @@ class ProcessingThread(QThread):
                 rmse_med = float(np.median(circle_rmse_px[ok_rmse])) if np.any(ok_rmse) else float("nan")
                 rmse_thresh = self.inputs.rmse_factor * rmse_med if np.isfinite(rmse_med) else float("nan")
                 
+                # Convert RMSE from pixels to mm
+                rmse_med_mm = rmse_med * mm_per_px if np.isfinite(rmse_med) else float("nan")
+                rmse_thresh_mm = rmse_thresh * mm_per_px if np.isfinite(rmse_thresh) else float("nan")
+                
                 if s_total > 1e-9:
                     s_frac = s_mm / s_total
                 else:
@@ -566,6 +570,8 @@ class ProcessingThread(QThread):
                     "stable_gate": stable_gate,
                     "rmse_med": rmse_med,
                     "rmse_thresh": rmse_thresh,
+                    "rmse_med_mm": rmse_med_mm,
+                    "rmse_thresh_mm": rmse_thresh_mm,
                     "Bo_plateau_raw": Bo_plateau_raw,
                     "Bo_plateau_filtered": Bo_plateau,
                     "plateau_start_i": plateau_start_i,
@@ -596,6 +602,10 @@ class ProcessingThread(QThread):
                 "Bo_high": Bo_high,
                 "Bo_final": Bo_final,
                 "best_error": best["best_error"],
+                "rmse_med": best["rmse_med"],
+                "rmse_thresh": best["rmse_thresh"],
+                "rmse_med_mm": best["rmse_med_mm"],
+                "rmse_thresh_mm": best["rmse_thresh_mm"],
                 "plateau_mask": best["plateau_mask"],
                 "plateau_length": best["plateau_length"],
                 "img": img,
@@ -638,6 +648,72 @@ class MainWindow(QMainWindow):
         """Initialize UI."""
         main_widget = QWidget()
         main_layout = QVBoxLayout()
+        
+        # Create title bar with logo and controls
+        title_layout = QHBoxLayout()
+        title_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Logo (left side) - try to load droppy.png
+        self.logo_label = QLabel()
+        try:
+            logo_pixmap = QPixmap("droppy.png")
+            if not logo_pixmap.isNull():
+                scaled_logo = logo_pixmap.scaledToHeight(30, Qt.TransformationMode.SmoothTransformation)
+                self.logo_label.setPixmap(scaled_logo)
+            else:
+                self.logo_label.setText("Droppy")
+                self.logo_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        except Exception:
+            self.logo_label.setText("Droppy")
+            self.logo_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        title_layout.addWidget(self.logo_label)
+        
+        title_layout.addStretch()
+        
+        # Minimize and close buttons (right side)
+        minimize_btn = QPushButton(" _ ")
+        minimize_btn.setMaximumWidth(30)
+        minimize_btn.setMaximumHeight(25)
+        minimize_btn.setToolTip("Minimize")
+        minimize_btn.setStyleSheet("""
+            QPushButton { 
+                background-color: #d3d3d3; 
+                color: black; 
+                font-weight: bold;
+                border: 1px solid #999;
+                padding: 0px;
+            }
+            QPushButton:hover { 
+                background-color: #e0e0e0;
+            }
+        """)
+        minimize_btn.clicked.connect(self.showMinimized)
+        title_layout.addWidget(minimize_btn)
+        
+        close_btn = QPushButton("✕")
+        close_btn.setMaximumWidth(30)
+        close_btn.setMaximumHeight(25)
+        close_btn.setToolTip("Close")
+        close_btn.setStyleSheet("""
+            QPushButton { 
+                background-color: #d3d3d3; 
+                color: red; 
+                font-weight: bold;
+                border: 1px solid #999;
+                padding: 0px;
+            }
+            QPushButton:hover { 
+                background-color: #ff6b6b;
+                color: white;
+            }
+        """)
+        close_btn.clicked.connect(self.close)
+        title_layout.addWidget(close_btn)
+        
+        title_widget = QWidget()
+        title_widget.setLayout(title_layout)
+        title_widget.setStyleSheet("background-color: #f0f0f0; border-bottom: 1px solid #ccc;")
+        main_layout.addWidget(title_widget)
         
         tabs = QTabWidget()
         tabs.addTab(self.create_image_tab(), "Image & Geometry")
@@ -1446,10 +1522,6 @@ class MainWindow(QMainWindow):
                 if 0 <= p_roi[0] < rw and 0 <= p_roi[1] < rh:
                     cv2.circle(viz_img, p_roi, 6, (128, 128, 128), -1)
             
-            # Text overlay
-            text = f"Bo_low={Bo_low:.6f}  Bo_high={Bo_high:.6f}  Bo_avg={Bo_final:.6f}"
-            cv2.putText(viz_img, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-            
             # Save files
             cv2.imwrite(os.path.join(outdir, "result_yl_overlay.png"), viz_img)
             cv2.imwrite(os.path.join(outdir, "edges.png"), cv2.cvtColor(edges_roi, cv2.COLOR_GRAY2BGR))
@@ -1464,6 +1536,10 @@ class MainWindow(QMainWindow):
                 "px_per_mm": px_per_mm,
                 "mm_per_px": mm_per_px,
                 "lensing_factor": lensing_factor,
+                "rmse_median_mm": result["rmse_med_mm"],
+                "rmse_threshold_mm": result["rmse_thresh_mm"],
+                "rmse_median_px": result["rmse_med"],
+                "rmse_threshold_px": result["rmse_thresh"],
             }
             with open(os.path.join(outdir, "summary.json"), "w") as f:
                 json.dump(summary, f, indent=2)
@@ -1508,21 +1584,17 @@ BOND NUMBERS:
   • High Clarity:  {summary['Bo_high']:.6f}
   • Averaged:      {summary['Bo_final']:.6f}
 
+RMS ERROR (Circle Detection Quality):
+  • Median RMSE:       {summary['rmse_median_mm']:.6f} mm
+  • RMSE Threshold:    {summary['rmse_threshold_mm']:.6f} mm
+  • (Median RMSE:      {summary['rmse_median_px']:.2f} px)
+  • (Threshold:        {summary['rmse_threshold_px']:.2f} px)
+
 PLATEAU:
   • Length:            {summary['plateau_length']} points
 
 LENSING:
   • Factor:            {summary['lensing_factor']:.3f}
-
-OUTPUT FILES:
-  ✓ result_yl_overlay.png
-  ✓ edges.png
-  ✓ summary.json
-
-VISUALIZATION:
-  Red:   Young-Laplace curve (avg Bo)
-  Yellow: Plateau points
-  Gray:  Extrema (tip, center, left, right)
 
 Location: {outdir}
 """)
