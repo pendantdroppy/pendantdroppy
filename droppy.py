@@ -18,7 +18,7 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QPushButton, QComboBox,
         QFileDialog, QMessageBox, QTabWidget, QGroupBox, QFormLayout,
-        QProgressBar, QTextEdit, QDialog, QScrollArea
+        QProgressBar, QTextEdit, QDialog, QScrollArea, QCheckBox
     )
     from PyQt6.QtCore import Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QPixmap, QImage
@@ -221,6 +221,494 @@ def integrate_young_laplace(Bo: float, droplet_type: str, z_stop: float = 3.0, d
         r_list.append(r)
         z_list.append(z)
     return np.array(r_list, dtype=np.float64), np.array(z_list, dtype=np.float64)
+
+
+def check_yl_needle_interception(
+    r_star_pred: np.ndarray,
+    z_star_pred: np.ndarray,
+    R0_len_mm: float,
+    tip: np.ndarray,
+    ex: np.ndarray,
+    ey: np.ndarray,
+    lensing_factor: float,
+    mm_per_px: float,
+) -> Tuple[bool, float]:
+    """Check if YL curve intercepts the needle at the tip."""
+    if len(r_star_pred) < 10:
+        return False, float('nan')
+    
+    # Convert YL curve to pixels
+    r_mm_pred = r_star_pred * R0_len_mm
+    z_mm_pred = z_star_pred * R0_len_mm
+    r_px_pred = (r_mm_pred / mm_per_px) / lensing_factor
+    z_px_pred = z_mm_pred / mm_per_px
+    
+    # Needle edge is at r_px = 0 (the axis at z=0)
+    # We're looking for where the YL curve crosses r_px ≈ 0
+    # This happens at the lowest z values in the curve
+    
+    # Get the portion of the curve near z ≈ 0 to R0
+    z_threshold = R0_len_mm / mm_per_px * 1.5  # Within ~1.5× R0 in pixels
+    near_tip_mask = (z_px_pred >= -1.0) & (z_px_pred <= z_threshold)
+    
+    if not np.any(near_tip_mask):
+        return False, float('nan')
+    
+    r_near_tip = r_px_pred[near_tip_mask]
+    
+    # Minimum r value tells us how close we get to the axis
+    min_r = np.min(np.abs(r_near_tip))
+    
+    # If min_r is very small (< 1 pixel), we're intercepting
+    intercepts = min_r < 2.0  # Within ~2 pixels of needle axis
+    
+    return intercepts, min_r
+
+
+def auto_correct_parameters_for_interception(
+    current_sigma: float,
+    current_canny1: int,
+    current_plateau_length: int,
+    current_Bo: float,
+    r_star_pred: np.ndarray,
+    z_star_pred: np.ndarray,
+    closest_distance_px: float,
+    step: int = 1,
+) -> Tuple[float, int, int]:
+    """
+    Auto-adjust parameters to improve YL curve interception with needle.
+    For rising droplets, if the YL curve doesn't reach the needle, we need to:
+    1. Increase sigma to smooth edges (better edge detection upstream)
+    2. Adjust canny1 to catch weaker edges
+    3. Possibly adjust plateau_length
+    
+    Args:
+        step: Iteration number (1=first attempt, 2=more aggressive, etc.)
+    
+    Returns:
+        (new_sigma, new_canny1, new_plateau_length)
+    """
+    new_sigma = current_sigma
+    new_canny1 = current_canny1
+    new_plateau_length = current_plateau_length
+    
+    # Distance from needle edge (larger = worse)
+    if closest_distance_px > 3.0:
+        # Curve is far from needle
+        if step == 1:
+            # First try: smooth more, lower canny threshold
+            new_sigma = min(current_sigma * 1.3, 4.0)
+            new_canny1 = max(current_canny1 - 10, 20)
+        elif step == 2:
+            # Second try: even more smoothing
+            new_sigma = min(current_sigma * 1.6, 5.0)
+            new_canny1 = max(current_canny1 - 20, 10)
+            new_plateau_length = int(current_plateau_length * 0.85)  # Smaller plateau
+        else:
+            # Third try: aggressive adjustments
+            new_sigma = min(current_sigma * 2.0, 6.0)
+            new_canny1 = max(current_canny1 - 30, 5)
+            new_plateau_length = int(current_plateau_length * 0.7)
+    
+    return new_sigma, new_canny1, new_plateau_length
+
+
+class YLCurveGenetic:
+    """Genetic algorithm for rising droplet YL curve optimization."""
+    
+    def __init__(
+        self,
+        initial_sigma: float,
+        initial_canny1: int,
+        initial_plateau_length: int,
+        initial_low_clarity: float,
+        initial_high_clarity: float,
+        initial_bo: float = 0.2,
+        pop_size: int = 8,
+        max_generations: int = 30,
+        mutation_rate: float = 0.15,
+        convergence_threshold: float = 0.001,
+    ):
+        self.initial_sigma = initial_sigma
+        self.initial_canny1 = initial_canny1
+        self.initial_plateau_length = initial_plateau_length
+        self.initial_low_clarity = initial_low_clarity
+        self.initial_high_clarity = initial_high_clarity
+        self.initial_bo = initial_bo
+        
+        self.pop_size = pop_size
+        self.max_generations = max_generations
+        self.mutation_rate = mutation_rate
+        self.convergence_threshold = convergence_threshold
+        
+        self.generation = 0
+        self.best_fitness_history = []
+        self.generation_images = []
+        self.best_individual = None
+        self.best_fitness = -float('inf')
+    
+    def create_individual(self, sigma=None, canny1=None, plateau_length=None, low_clarity=None, high_clarity=None, bo=None):
+        """Create a parameter individual."""
+        return {
+            'sigma': sigma if sigma is not None else self.initial_sigma,
+            'canny1': canny1 if canny1 is not None else self.initial_canny1,
+            'plateau_length': plateau_length if plateau_length is not None else self.initial_plateau_length,
+            'low_clarity': low_clarity if low_clarity is not None else self.initial_low_clarity,
+            'high_clarity': high_clarity if high_clarity is not None else self.initial_high_clarity,
+            'bo': bo if bo is not None else self.initial_bo,
+        }
+    
+    def mutate_individual(self, individual):
+        """Mutate individual with strong random parameter changes."""
+        mutant = individual.copy()
+        
+        # ALWAYS mutate all six parameters (guarantee diversity)
+        # Mutate sigma: ±50%
+        factor = np.random.uniform(0.5, 1.5)
+        mutant['sigma'] = np.clip(mutant['sigma'] * factor, 0.5, 5.0)
+        
+        # Mutate canny1: ±50
+        delta = np.random.randint(-50, 51)
+        mutant['canny1'] = np.clip(mutant['canny1'] + delta, 5, 150)
+        
+        # Mutate plateau_length: ±30%
+        factor = np.random.uniform(0.7, 1.3)
+        mutant['plateau_length'] = int(np.clip(
+            mutant['plateau_length'] * factor, 50, 150
+        ))
+        
+        # Mutate low_clarity: ±40%
+        factor = np.random.uniform(0.6, 1.4)
+        mutant['low_clarity'] = np.clip(mutant['low_clarity'] * factor, 0.05, 0.5)
+        
+        # Mutate high_clarity: ±40%
+        factor = np.random.uniform(0.6, 1.4)
+        mutant['high_clarity'] = np.clip(mutant['high_clarity'] * factor, 0.005, 0.15)
+        
+        # Mutate Bo: ±50%
+        factor = np.random.uniform(0.5, 1.5)
+        mutant['bo'] = np.clip(mutant['bo'] * factor, 0.01, 1.0)
+        
+        return mutant
+    
+    def crossover(self, parent1, parent2):
+        """Create offspring from two parents."""
+        # Blend parameters from both parents
+        child = {
+            'sigma': (parent1['sigma'] + parent2['sigma']) / 2.0 + np.random.normal(0, 0.1),
+            'canny1': int((parent1['canny1'] + parent2['canny1']) / 2.0 + np.random.normal(0, 2)),
+            'plateau_length': int((parent1['plateau_length'] + parent2['plateau_length']) / 2.0),
+            'low_clarity': (parent1['low_clarity'] + parent2['low_clarity']) / 2.0 + np.random.normal(0, 0.01),
+            'high_clarity': (parent1['high_clarity'] + parent2['high_clarity']) / 2.0 + np.random.normal(0, 0.005),
+            'bo': (parent1['bo'] + parent2['bo']) / 2.0 + np.random.normal(0, 0.02),
+        }
+        
+        # Ensure bounds
+        child['sigma'] = np.clip(child['sigma'], 0.5, 5.0)
+        child['canny1'] = np.clip(child['canny1'], 5, 150)
+        child['plateau_length'] = np.clip(child['plateau_length'], 50, 150)
+        child['low_clarity'] = np.clip(child['low_clarity'], 0.05, 0.5)
+        child['high_clarity'] = np.clip(child['high_clarity'], 0.005, 0.15)
+        child['bo'] = np.clip(child['bo'], 0.01, 1.0)
+        
+        return child
+    
+    def calculate_fitness(
+        self,
+        displacement_px: float,
+        rmse_mm: float,
+        bo_error: float,
+        plateau_fitness: float,
+    ) -> float:
+        """
+        Calculate multi-objective fitness score.
+        Higher is better.
+        
+        Args:
+            displacement_px: Distance to needle corner (lower is better)
+            rmse_mm: Circle detection RMSE in mm (lower is better)
+            bo_error: YL fit error (lower is better)
+            plateau_fitness: Fit quality on plateau (0-1, higher is better)
+        
+        Returns:
+            Fitness score (higher is better)
+        """
+        # Normalize components (using inverse/negative for "minimize" objectives)
+        displacement_score = 1.0 / (1.0 + displacement_px)  # 1 at d=0, decays
+        rmse_score = 1.0 / (1.0 + rmse_mm * 100)  # Scaled for mm units
+        error_score = 1.0 / (1.0 + bo_error)
+        
+        # Weighted combination (displacement is most critical)
+        fitness = (
+            0.5 * displacement_score +
+            0.2 * rmse_score +
+            0.15 * error_score +
+            0.15 * plateau_fitness
+        )
+        
+        return fitness
+    
+    def evolve(self, evaluate_func, output_dir: str):
+        """
+        Main evolutionary loop.
+        
+        Args:
+            evaluate_func: Function that takes parameters dict and returns
+                          (fitness, metrics_dict, image_array)
+            output_dir: Directory to save generation images
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Initialize population with diversity
+        population = []
+        for i in range(self.pop_size):
+            if i == 0:
+                # First individual: use defaults
+                population.append(self.create_individual())
+            else:
+                # Other individuals: add random variations
+                sigma = self.initial_sigma * np.random.uniform(0.7, 1.3)
+                canny1 = int(self.initial_canny1 + np.random.randint(-30, 31))
+                plateau = int(self.initial_plateau_length * np.random.uniform(0.8, 1.2))
+                low_clarity = self.initial_low_clarity * np.random.uniform(0.7, 1.3)
+                high_clarity = self.initial_high_clarity * np.random.uniform(0.7, 1.3)
+                bo = self.initial_bo * np.random.uniform(0.7, 1.3)
+                
+                sigma = np.clip(sigma, 0.5, 5.0)
+                canny1 = np.clip(canny1, 5, 150)
+                plateau = np.clip(plateau, 50, 150)
+                low_clarity = np.clip(low_clarity, 0.05, 0.5)
+                high_clarity = np.clip(high_clarity, 0.005, 0.15)
+                bo = np.clip(bo, 0.01, 1.0)
+                
+                population.append(self.create_individual(sigma, canny1, plateau, low_clarity, high_clarity, bo))
+        
+        for gen in range(self.max_generations):
+            self.generation = gen
+            
+            # Evaluate population
+            fitnesses = []
+            individuals_data = []
+            
+            
+            for ind in population:
+                fitness, metrics, gen_image = evaluate_func(ind)
+                fitnesses.append(fitness)
+                individuals_data.append((ind, fitness, metrics, gen_image))
+            
+            # Sort by fitness
+            individuals_data.sort(key=lambda x: x[1], reverse=True)
+            fitnesses.sort(reverse=True)
+            
+            # Track best
+            if fitnesses[0] > self.best_fitness:
+                self.best_fitness = fitnesses[0]
+                self.best_individual = individuals_data[0][0].copy()
+            
+            self.best_fitness_history.append(self.best_fitness)
+            
+            # Save generation image
+            if individuals_data[0][3] is not None:
+                gen_img_path = os.path.join(output_dir, f"gen_{gen:03d}_best.png")
+                cv2.imwrite(gen_img_path, individuals_data[0][3])
+                self.generation_images.append(gen_img_path)
+            
+            # Check convergence - require at least 10 generations and meaningful improvement
+            if len(self.best_fitness_history) >= 10:
+                recent_improvement = (
+                    self.best_fitness_history[-1] - self.best_fitness_history[-10]
+                )
+                # Need at least 0.01 improvement per 10 generations
+                if abs(recent_improvement) < 0.01:
+                    break
+            
+            # Selection + crossover + mutation
+            # Keep top performers (elitism)
+            elite_count = max(2, self.pop_size // 4)
+            new_population = [ind for ind, _, _, _ in individuals_data[:elite_count]]
+            
+            # Fill rest with crossover + mutation
+            while len(new_population) < self.pop_size:
+                # Select parents (tournament selection)
+                p1_idx = np.random.randint(0, elite_count)
+                p2_idx = np.random.randint(0, elite_count)
+                parent1 = individuals_data[p1_idx][0]
+                parent2 = individuals_data[p2_idx][0]
+                
+                # Crossover
+                child = self.crossover(parent1, parent2)
+                
+                # Mutation
+                child = self.mutate_individual(child)
+                
+                new_population.append(child)
+            
+            population = new_population
+        
+        return self.best_individual, self.best_fitness_history
+
+
+
+
+class YLCurveFallingDroplet:
+    """Genetic algorithm for falling droplet YL curve optimization."""
+    
+    def __init__(
+        self,
+        initial_sigma: float,
+        initial_canny1: int,
+        initial_plateau_length: int,
+        initial_low_clarity: float,
+        initial_high_clarity: float,
+        initial_bo: float = 0.2,
+        pop_size: int = 8,
+        max_generations: int = 30,
+        mutation_rate: float = 0.15,
+        convergence_threshold: float = 0.001,
+    ):
+        self.initial_sigma = initial_sigma
+        self.initial_canny1 = initial_canny1
+        self.initial_plateau_length = initial_plateau_length
+        self.initial_low_clarity = initial_low_clarity
+        self.initial_high_clarity = initial_high_clarity
+        self.initial_bo = initial_bo
+        
+        self.pop_size = pop_size
+        self.max_generations = max_generations
+        self.mutation_rate = mutation_rate
+        self.convergence_threshold = convergence_threshold
+        
+        self.generation = 0
+        self.best_fitness_history = []
+        self.best_individual = None
+        self.best_fitness = -float('inf')
+    
+    def create_individual(self, sigma=None, canny1=None, plateau_length=None, low_clarity=None, high_clarity=None, bo=None):
+        """Create a parameter individual."""
+        return {
+            'sigma': sigma if sigma is not None else self.initial_sigma,
+            'canny1': canny1 if canny1 is not None else self.initial_canny1,
+            'plateau_length': plateau_length if plateau_length is not None else self.initial_plateau_length,
+            'low_clarity': low_clarity if low_clarity is not None else self.initial_low_clarity,
+            'high_clarity': high_clarity if high_clarity is not None else self.initial_high_clarity,
+            'bo': bo if bo is not None else self.initial_bo,
+        }
+    
+    def mutate_individual(self, individual):
+        """Mutate an individual with random parameter changes."""
+        mutant = individual.copy()
+        
+        # ALWAYS mutate all six parameters
+        factor = np.random.uniform(0.5, 1.5)
+        mutant['sigma'] = np.clip(mutant['sigma'] * factor, 0.5, 5.0)
+        
+        delta = np.random.randint(-50, 51)
+        mutant['canny1'] = np.clip(mutant['canny1'] + delta, 5, 150)
+        
+        factor = np.random.uniform(0.7, 1.3)
+        mutant['plateau_length'] = int(np.clip(
+            mutant['plateau_length'] * factor, 50, 150
+        ))
+        
+        factor = np.random.uniform(0.6, 1.4)
+        mutant['low_clarity'] = np.clip(mutant['low_clarity'] * factor, 0.05, 0.5)
+        
+        factor = np.random.uniform(0.6, 1.4)
+        mutant['high_clarity'] = np.clip(mutant['high_clarity'] * factor, 0.005, 0.15)
+        
+        factor = np.random.uniform(0.5, 1.5)
+        mutant['bo'] = np.clip(mutant['bo'] * factor, 0.01, 1.0)
+        
+        return mutant
+    
+    def crossover(self, parent1, parent2):
+        """Create offspring from two parents."""
+        child = {
+            'sigma': (parent1['sigma'] + parent2['sigma']) / 2.0 + np.random.normal(0, 0.1),
+            'canny1': int((parent1['canny1'] + parent2['canny1']) / 2.0 + np.random.normal(0, 2)),
+            'plateau_length': int((parent1['plateau_length'] + parent2['plateau_length']) / 2.0),
+            'low_clarity': (parent1['low_clarity'] + parent2['low_clarity']) / 2.0 + np.random.normal(0, 0.01),
+            'high_clarity': (parent1['high_clarity'] + parent2['high_clarity']) / 2.0 + np.random.normal(0, 0.005),
+            'bo': (parent1['bo'] + parent2['bo']) / 2.0 + np.random.normal(0, 0.02),
+        }
+        
+        child['sigma'] = np.clip(child['sigma'], 0.5, 5.0)
+        child['canny1'] = np.clip(child['canny1'], 5, 150)
+        child['plateau_length'] = np.clip(child['plateau_length'], 50, 150)
+        child['low_clarity'] = np.clip(child['low_clarity'], 0.05, 0.5)
+        child['high_clarity'] = np.clip(child['high_clarity'], 0.005, 0.15)
+        child['bo'] = np.clip(child['bo'], 0.01, 1.0)
+        
+        return child
+    
+    def evolve(self, evaluate_func, output_dir: str):
+        """Main evolutionary loop for falling droplet."""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Initialize population with diversity
+        population = []
+        for i in range(self.pop_size):
+            if i == 0:
+                population.append(self.create_individual())
+            else:
+                sigma = self.initial_sigma * np.random.uniform(0.7, 1.3)
+                canny1 = int(self.initial_canny1 + np.random.randint(-30, 31))
+                plateau = int(self.initial_plateau_length * np.random.uniform(0.8, 1.2))
+                low_clarity = self.initial_low_clarity * np.random.uniform(0.7, 1.3)
+                high_clarity = self.initial_high_clarity * np.random.uniform(0.7, 1.3)
+                bo = self.initial_bo * np.random.uniform(0.7, 1.3)
+                
+                sigma = np.clip(sigma, 0.5, 5.0)
+                canny1 = np.clip(canny1, 5, 150)
+                plateau = np.clip(plateau, 50, 150)
+                low_clarity = np.clip(low_clarity, 0.05, 0.5)
+                high_clarity = np.clip(high_clarity, 0.005, 0.15)
+                bo = np.clip(bo, 0.01, 1.0)
+                
+                population.append(self.create_individual(sigma, canny1, plateau, low_clarity, high_clarity, bo))
+        
+        for gen in range(self.max_generations):
+            self.generation = gen
+            
+            individuals_data = []
+            fitnesses = []
+            
+            for ind in population:
+                fitness, metrics, gen_image = evaluate_func(ind)
+                fitnesses.append(fitness)
+                individuals_data.append((ind, fitness, metrics, gen_image))
+            
+            individuals_data.sort(key=lambda x: x[1], reverse=True)
+            fitnesses.sort(reverse=True)
+            
+            if fitnesses[0] > self.best_fitness:
+                self.best_fitness = fitnesses[0]
+                self.best_individual = individuals_data[0][0].copy()
+            
+            self.best_fitness_history.append(self.best_fitness)
+            
+            # Check convergence
+            if len(self.best_fitness_history) >= 10:
+                recent_improvement = (
+                    self.best_fitness_history[-1] - self.best_fitness_history[-10]
+                )
+                if abs(recent_improvement) < 0.01:
+                    break
+            
+            # Selection + crossover + mutation
+            elite_count = max(2, self.pop_size // 4)
+            new_population = [ind for ind, _, _, _ in individuals_data[:elite_count]]
+            
+            while len(new_population) < self.pop_size:
+                p1 = individuals_data[np.random.randint(0, len(individuals_data) // 2)][0]
+                p2 = individuals_data[np.random.randint(0, len(individuals_data) // 2)][0]
+                child = self.crossover(p1, p2)
+                child = self.mutate_individual(child)
+                new_population.append(child)
+            
+            population = new_population
+        
+        return self.best_individual, self.best_fitness_history
 
 
 class ProcessingThread(QThread):
@@ -590,11 +1078,486 @@ class ProcessingThread(QThread):
             if result_low is None or result_high is None:
                 raise ValueError("Pipeline failed for one or both clarity runs")
             
-            Bo_low = float(result_low["best_Bo"])
-            Bo_high = float(result_high["best_Bo"])
-            Bo_final = 0.5 * (Bo_low + Bo_high)
+            # GENETIC ALGORITHM OPTIMIZATION (Rising droplets only)
+            use_ga = self.ui_params.get("use_genetic_algorithm", False)
+            ga_best_params = None
+            ga_enabled_final = False
+            
+            if use_ga and self.inputs.droplet_type == "rising":
+                self.progress.emit("Running genetic algorithm optimization...")
+                
+                # Create evaluation function that the GA will call
+                def evaluate_params(params_dict):
+                    """
+                    Evaluate a parameter set by running full pipeline with new parameters.
+                    Returns: (fitness, metrics_dict, visualization_image)
+                    """
+                    # Extract parameters
+                    sigma_test = float(params_dict['sigma'])
+                    canny1_test = int(params_dict['canny1'])
+                    plateau_len_test = int(params_dict['plateau_length'])
+                    low_clarity_test = float(params_dict.get('low_clarity', self.ui_params.get("low_clarity_ratio", 0.1)))
+                    high_clarity_test = float(params_dict.get('high_clarity', self.ui_params.get("high_clarity_ratio", 0.01)))
+                    
+                    # Re-run edge detection with new sigma and canny1
+                    edges_test = find_edges_masked(gray, sigma_test, canny1_test, self.inputs.canny2, droplet_mask)
+                    
+                    contours_test, _ = cv2.findContours(edges_test, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                    if not contours_test:
+                        # Error: lower sigma and retry once
+                        sigma_reduced = max(0.5, sigma_test * 0.8)
+                        edges_test = find_edges_masked(gray, sigma_reduced, canny1_test, self.inputs.canny2, droplet_mask)
+                        contours_test, _ = cv2.findContours(edges_test, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                        if not contours_test:
+                            return 0.001, {"error": "No contours (even after sigma reduction)"}, None
+                        sigma_test = sigma_reduced
+                    
+                    contours_xy_test = [c.reshape(-1, 2).astype(np.float64) for c in contours_test]
+                    
+                    # Filter by ROI
+                    x0_roi, y0_roi, rw_roi, rh_roi = self.ui_params["roi_box"]
+                    x1_roi = x0_roi + rw_roi
+                    y1_roi = y0_roi + rh_roi
+                    filtered = []
+                    for c in contours_xy_test:
+                        mask = (c[:, 0] >= x0_roi) & (c[:, 0] <= x1_roi) & (c[:, 1] >= y0_roi) & (c[:, 1] <= y1_roi)
+                        c_filt = c[mask]
+                        if len(c_filt) > 50:
+                            filtered.append(c_filt)
+                    
+                    if not filtered:
+                        return 0.001, {"error": "No ROI contours"}, None
+                    
+                    contour_test = max(filtered, key=lambda c: len(c))
+                    
+                    # Use sampled contour points
+                    start_idx_test = nearest_index(contour_test, extreme_xy)
+                    pts_test = cyclic_slice(contour_test, start_idx_test, sample_len, self.inputs.direction)
+                    M_test = len(pts_test)
+                    
+                    if M_test < 20:
+                        return 0.001, {"error": "Too few points"}, None
+                    
+                    # Calculate circle window with HIGH clarity ratio
+                    W_test_high = max(1, int(round(high_clarity_test * M_test)))
+                    circle_c_test = np.full((M_test, 2), np.nan, dtype=np.float64)
+                    circle_rmse_px_test = np.full(M_test, np.nan, dtype=np.float64)
+                    
+                    for i in range(M_test):
+                        i0 = max(0, i - W_test_high)
+                        i1 = min(M_test, i + W_test_high + 1)
+                        window_pts = pts_test[i0:i1]
+                        cxy, rad_px, rmse_px, ok = fit_circle_kasa(window_pts)
+                        circle_c_test[i] = cxy
+                        circle_rmse_px_test[i] = rmse_px
+                    
+                    ok_rmse_test = np.isfinite(circle_rmse_px_test)
+                    if not np.any(ok_rmse_test):
+                        return 0.001, {"error": "No valid RMSE"}, None
+                    
+                    rmse_med_test = float(np.median(circle_rmse_px_test[ok_rmse_test]))
+                    rmse_mm_test = rmse_med_test * mm_per_px
+                    
+                    # Convert to droplet coordinates
+                    deltas_test = pts_test - tip
+                    r_p_px_test = (deltas_test @ ex)
+                    z_p_px_test = deltas_test @ ey
+                    r_p_mm_test = r_p_px_test * mm_per_px
+                    z_p_mm_test = z_p_px_test * mm_per_px
+                    r_star_test = r_p_mm_test / R0_len_mm
+                    z_star_test = z_p_mm_test / R0_len_mm
+                    
+                    # Calculate displacement (primary objective)
+                    near_tip_mask = (z_p_px_test >= -2.0) & (z_p_px_test <= R0_len_mm / mm_per_px * 2.0)
+                    if not np.any(near_tip_mask):
+                        displacement = 999
+                    else:
+                        r_near = np.abs(r_p_px_test[near_tip_mask])
+                        displacement = float(np.min(r_near))
+                    
+                    # Calculate plateau-based Bo fitness
+                    # Use plateau_len_test to select plateau region
+                    equator_z_test = R0_len_mm
+                    equator_idx_test = int(np.argmin(np.abs(z_p_mm_test - equator_z_test)))
+                    half_len_test = plateau_len_test // 2
+                    
+                    plateau_start_i_test = equator_idx_test - half_len_test
+                    plateau_end_i_test = equator_idx_test + half_len_test
+                    
+                    # Boundary handling
+                    if plateau_start_i_test < 0:
+                        plateau_start_i_test = 0
+                        plateau_end_i_test = min(M_test - 1, plateau_len_test - 1)
+                    if plateau_end_i_test >= M_test:
+                        plateau_end_i_test = M_test - 1
+                        plateau_start_i_test = max(0, M_test - plateau_len_test)
+                    
+                    plateau_mask_test = np.zeros(M_test, dtype=bool)
+                    plateau_mask_test[plateau_start_i_test:plateau_end_i_test + 1] = True
+                    
+                    r_meas_test = r_star_test[plateau_mask_test]
+                    z_meas_test = z_star_test[plateau_mask_test]
+                    ok_m_test = np.isfinite(r_meas_test) & np.isfinite(z_meas_test)
+                    r_meas_test = r_meas_test[ok_m_test]
+                    z_meas_test = z_meas_test[ok_m_test]
+                    
+                    if r_meas_test.size < 10:
+                        return 0.001, {"error": "Too few plateau points"}, None
+                    
+                    # USE THE BO FROM THE INDIVIDUAL (not estimated)
+                    bo_test = float(params_dict.get('bo', 0.2))
+                    
+                    # Generate YL curve with this Bo
+                    try:
+                        r_yl, z_yl = integrate_young_laplace(bo_test, "rising", z_stop=3.0)
+                        if len(z_yl) < 10:
+                            return 0.001, {"error": "YL integration failed"}, None
+                    except:
+                        return 0.001, {"error": "YL error"}, None
+                    
+                    # Calculate fit error to plateau
+                    z0 = float(z_yl[0])
+                    z1 = float(z_yl[-1])
+                    order = np.argsort(z_meas_test)
+                    z_s = z_meas_test[order]
+                    r_s = r_meas_test[order]
+                    
+                    zq = np.clip(z_s, z0, z1)
+                    r_interp = np.interp(zq, z_yl, r_yl)
+                    bo_error = float(np.sqrt(np.mean((r_s - r_interp) ** 2)))
+                    
+                    # Calculate distance from YL curve to the needle corner point
+                    # BUT offset the target point UP by ~8px to better follow the droplet curve
+                    # This accounts for the natural curvature of the droplet surface
+                    needle_corner_xy = np.array(self.inputs.needle_left_xy, dtype=np.float64)
+                    # Offset UP (toward tip, negative ey direction) by 8 pixels
+                    needle_intercept_target = needle_corner_xy - 8.0 * ey  # 8px UP from corner
+                    
+                    needle_target_rel_tip = needle_intercept_target - tip  # Vector from tip to target
+                    
+                    # Project onto droplet coordinate system
+                    needle_target_r = needle_target_rel_tip @ ex  # Radial component (in pixels)
+                    needle_target_z = needle_target_rel_tip @ ey  # Axial component (in pixels)
+                    
+                    # Convert to normalized droplet coordinates
+                    needle_target_r_norm = (needle_target_r * mm_per_px) / R0_len_mm
+                    needle_target_z_norm = (needle_target_z * mm_per_px) / R0_len_mm
+                    
+                    # Now find the closest point on the YL curve to this offset target point
+                    # YL curve is in (r, z) normalized coordinates
+                    distances_to_target = np.sqrt((r_yl - needle_target_r_norm)**2 + (z_yl - needle_target_z_norm)**2)
+                    min_distance_to_needle = float(np.min(distances_to_target))
+                    
+                    # Convert back to pixels for reporting
+                    needle_intercept_distance = min_distance_to_needle * R0_len_mm / mm_per_px
+                    
+                    # Penalty if it doesn't intercept (distance should be small)
+                    intercept_score = 1.0 / (1.0 + needle_intercept_distance)
+                    
+                    # Plateau fitness: How well YL curve fits the measured plateau points
+                    # bo_error is the RMSE between YL and ALL measured radii on plateau
+                    plateau_fitness = 1.0 / (1.0 + bo_error)  # Higher fitness when RMSE is lower
+                    
+                    # SIMPLE CONSTRAINT: YL curve cannot be closer to centerline (smaller radius)
+                    # than the needle intercept point UNTIL it is below that point
+                    # BUT: Only applies BELOW the equator (z > 0)
+                    closeness_penalty = 0.0
+                    
+                    # Find YL points that are ABOVE the intercept point (z < needle_target_z_norm)
+                    # AND below the equator (z > 0)
+                    # These should NOT be closer to centerline than the intercept
+                    above_intercept_mask = (z_yl < needle_target_z_norm) & (z_yl > 0)
+                    
+                    if np.any(above_intercept_mask):
+                        above_r = r_yl[above_intercept_mask]
+                        # Any point above intercept that's narrower than intercept gets penalized
+                        violations = above_r < needle_target_r_norm
+                        if np.any(violations):
+                            # Sum up the violations
+                            violation_amounts = needle_target_r_norm - above_r[violations]
+                            violation_px = violation_amounts * R0_len_mm / mm_per_px
+                            closeness_penalty = 0.1 * np.sum(violation_px)
+                    
+                    # ADDITIONAL: Score how well YL curve passes through the lowest point of the plateau
+                    # Find the point in the plateau with the lowest z-value (deepest into droplet)
+                    if len(z_s) > 0:
+                        lowest_z_idx = np.argmin(z_s)  # Index of lowest z in sorted plateau
+                        lowest_z = z_s[lowest_z_idx]
+                        lowest_r_measured = r_s[lowest_z_idx]
+                        
+                        # Interpolate YL curve at this z-value
+                        if z0 <= lowest_z <= z1:
+                            lowest_r_yl = float(np.interp(lowest_z, z_yl, r_yl))
+                            # Calculate error at lowest point
+                            lowest_point_error = abs(lowest_r_measured - lowest_r_yl)
+                            # Score: how close YL is to this lowest plateau point
+                            lowest_point_score = 1.0 / (1.0 + lowest_point_error)
+                        else:
+                            lowest_point_score = 0.0  # YL curve doesn't span to lowest point
+                    else:
+                        lowest_point_score = 0.0
+                    
+                    # Calculate fitness with clear goal:
+                    # PRIMARY: YL curve must intercept the END of the plateau (lowest point)
+                    # SECONDARY: YL curve should also reach the needle corner
+                    # TERTIARY: Overall fit quality to all points
+                    # CONSTRAINT: Below equator only - no narrowing above intercept point
+                    
+                    fitness = (
+                        0.4 * lowest_point_score +                 # END of plateau fit (PRIMARY - 40%)
+                        0.2 * intercept_score +                    # Needle corner reach (SECONDARY - 20%)
+                        0.25 * plateau_fitness +                   # Overall plateau fit (25%)
+                        0.15 / (1.0 + rmse_mm_test * 100) -        # Circle quality (15%)
+                        closeness_penalty                          # Penalty if curve narrower than intercept above it (below equator only)
+                    )
+                    
+                    metrics = {
+                        "sigma": f"{sigma_test:.2f}",
+                        "canny1": canny1_test,
+                        "plateau": plateau_len_test,
+                        "Bo": f"{bo_test:.4f}",
+                        "RMSE_mm": f"{rmse_mm_test:.6f}",
+                        "intercept_px": f"{needle_intercept_distance:.2f}",
+                        "lowest_point_score": f"{lowest_point_score:.4f}",
+                        "bo_error": f"{bo_error:.6f}",
+                    }
+                    
+                    return fitness, metrics, None
+                
+                # Run GA
+                outdir_ga = self.ui_params["roi_box"]  # Hack: use roi_box for now, should be output dir
+                outdir_ga = self.ui_params.get("output_dir", "droppy_out")
+                
+                ga = YLCurveGenetic(
+                    initial_sigma=self.inputs.sigma,
+                    initial_canny1=self.inputs.canny1,
+                    initial_plateau_length=self.ui_params["plateau_width"],
+                    initial_low_clarity=self.ui_params.get("low_clarity_ratio", 0.1),
+                    initial_high_clarity=self.ui_params.get("high_clarity_ratio", 0.01),
+                    initial_bo=0.2,  # Default starting Bo (will be optimized)
+                    pop_size=self.ui_params.get("ga_population", 8),
+                    max_generations=self.ui_params.get("ga_generations", 30),
+                )
+                
+                ga_best_params, ga_fitness_history = ga.evolve(evaluate_params, outdir_ga + "/ga_generations")
+                ga_enabled_final = True
+            
+            elif use_ga and self.inputs.droplet_type == "pendant":
+                self.progress.emit("Running genetic algorithm optimization (falling droplet)...")
+                
+                # Create evaluation function for falling droplet
+                def evaluate_params_falling(params_dict):
+                    """
+                    Evaluate a parameter set for FALLING droplet.
+                    Goal: YL curve intercepts both equator point (right) and first plateau point
+                    Returns: (fitness, metrics_dict, visualization_image)
+                    """
+                    sigma_test = float(params_dict['sigma'])
+                    canny1_test = int(params_dict['canny1'])
+                    plateau_len_test = int(params_dict['plateau_length'])
+                    low_clarity_test = float(params_dict.get('low_clarity', self.ui_params.get("low_clarity_ratio", 0.1)))
+                    high_clarity_test = float(params_dict.get('high_clarity', self.ui_params.get("high_clarity_ratio", 0.01)))
+                    bo_test = float(params_dict.get('bo', 0.2))
+                    
+                    # Re-run edge detection with new sigma and canny1
+                    edges_test = find_edges_masked(gray, sigma_test, canny1_test, self.inputs.canny2, droplet_mask)
+                    
+                    contours_test, _ = cv2.findContours(edges_test, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                    if not contours_test:
+                        # Error: lower sigma and retry once
+                        sigma_reduced = max(0.5, sigma_test * 0.8)
+                        edges_test = find_edges_masked(gray, sigma_reduced, canny1_test, self.inputs.canny2, droplet_mask)
+                        contours_test, _ = cv2.findContours(edges_test, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                        if not contours_test:
+                            return 0.001, {"error": "No contours (even after sigma reduction)"}, None
+                        sigma_test = sigma_reduced
+                    
+                    contours_xy_test = [c.reshape(-1, 2).astype(np.float64) for c in contours_test]
+                    
+                    # Filter by ROI
+                    x0_roi, y0_roi, rw_roi, rh_roi = self.ui_params["roi_box"]
+                    x1_roi = x0_roi + rw_roi
+                    y1_roi = y0_roi + rh_roi
+                    filtered = []
+                    for c in contours_xy_test:
+                        mask = (c[:, 0] >= x0_roi) & (c[:, 0] <= x1_roi) & (c[:, 1] >= y0_roi) & (c[:, 1] <= y1_roi)
+                        c_filt = c[mask]
+                        if len(c_filt) > 50:
+                            filtered.append(c_filt)
+                    
+                    if not filtered:
+                        return 0.001, {"error": "No ROI contours"}, None
+                    
+                    contour_test = max(filtered, key=lambda c: len(c))
+                    
+                    # Use sampled contour points
+                    start_idx_test = nearest_index(contour_test, extreme_xy)
+                    pts_test = cyclic_slice(contour_test, start_idx_test, sample_len, self.inputs.direction)
+                    M_test = len(pts_test)
+                    
+                    if M_test < 20:
+                        return 0.001, {"error": "Too few points"}, None
+                    
+                    # Circle fitting
+                    W_test_high = max(1, int(round(high_clarity_test * M_test)))
+                    circle_c_test = np.full((M_test, 2), np.nan, dtype=np.float64)
+                    circle_rmse_px_test = np.full(M_test, np.nan, dtype=np.float64)
+                    
+                    for i in range(M_test):
+                        i0 = max(0, i - W_test_high)
+                        i1 = min(M_test, i + W_test_high + 1)
+                        window_pts = pts_test[i0:i1]
+                        cxy, rad_px, rmse_px, ok = fit_circle_kasa(window_pts)
+                        circle_c_test[i] = cxy
+                        circle_rmse_px_test[i] = rmse_px
+                    
+                    ok_rmse_test = np.isfinite(circle_rmse_px_test)
+                    if not np.any(ok_rmse_test):
+                        return 0.001, {"error": "No valid RMSE"}, None
+                    
+                    rmse_med_test = float(np.median(circle_rmse_px_test[ok_rmse_test]))
+                    rmse_mm_test = rmse_med_test * mm_per_px
+                    
+                    # Convert to droplet coordinates
+                    deltas_test = pts_test - tip
+                    r_p_px_test = (deltas_test @ ex)
+                    z_p_px_test = deltas_test @ ey
+                    r_p_mm_test = r_p_px_test * mm_per_px
+                    z_p_mm_test = z_p_px_test * mm_per_px
+                    r_star_test = r_p_mm_test / R0_len_mm
+                    z_star_test = z_p_mm_test / R0_len_mm
+                    
+                    # For FALLING droplet: find equator point (z=0) and first plateau point
+                    equator_idx_test = int(np.argmin(np.abs(z_p_mm_test)))
+                    
+                    # Find plateau region (for falling: above equator in droplet coords, which is negative z)
+                    equator_z_test = -R0_len_mm  # For pendant, equator is negative z
+                    plateau_start_i_test = int(np.argmin(np.abs(z_p_mm_test - equator_z_test)))
+                    half_len_test = plateau_len_test // 2
+                    plateau_start_i_test = max(0, plateau_start_i_test - half_len_test)
+                    plateau_end_i_test = min(M_test - 1, plateau_start_i_test + plateau_len_test)
+                    
+                    # Get plateau measurements
+                    plateau_mask_test = np.zeros(M_test, dtype=bool)
+                    plateau_mask_test[plateau_start_i_test:plateau_end_i_test + 1] = True
+                    
+                    r_meas_test = r_star_test[plateau_mask_test]
+                    z_meas_test = z_star_test[plateau_mask_test]
+                    ok_m_test = np.isfinite(r_meas_test) & np.isfinite(z_meas_test)
+                    r_meas_test = r_meas_test[ok_m_test]
+                    z_meas_test = z_meas_test[ok_m_test]
+                    
+                    if r_meas_test.size < 5:
+                        return 0.001, {"error": "Too few plateau points"}, None
+                    
+                    # Generate YL curve with this Bo
+                    try:
+                        r_yl, z_yl = integrate_young_laplace(bo_test, "pendant", z_stop=3.0)
+                        if len(z_yl) < 10:
+                            return 0.001, {"error": "YL integration failed"}, None
+                    except:
+                        return 0.001, {"error": "YL error"}, None
+                    
+                    # Calculate fit error to plateau
+                    z0 = float(z_yl[0])
+                    z1 = float(z_yl[-1])
+                    order = np.argsort(z_meas_test)
+                    z_s = z_meas_test[order]
+                    r_s = r_meas_test[order]
+                    
+                    zq = np.clip(z_s, z0, z1)
+                    r_interp = np.interp(zq, z_yl, r_yl)
+                    bo_error = float(np.sqrt(np.mean((r_s - r_interp) ** 2)))
+                    
+                    # SCORE 1: Distance to equator point (right side, z=0)
+                    equator_r_measured = float(r_star_test[equator_idx_test])
+                    # Find YL at z=0
+                    equator_yl_idx = int(np.argmin(np.abs(z_yl)))
+                    equator_r_yl = float(r_yl[equator_yl_idx])
+                    equator_error = abs(equator_r_measured - equator_r_yl)
+                    equator_score = 1.0 / (1.0 + equator_error)
+                    
+                    # SCORE 2: Distance to first plateau point
+                    if len(z_s) > 0:
+                        first_plateau_idx = 0
+                        first_plateau_z = z_s[first_plateau_idx]
+                        first_plateau_r = r_s[first_plateau_idx]
+                        
+                        if z0 <= first_plateau_z <= z1:
+                            first_plateau_r_yl = float(np.interp(first_plateau_z, z_yl, r_yl))
+                            first_plateau_error = abs(first_plateau_r - first_plateau_r_yl)
+                            first_plateau_score = 1.0 / (1.0 + first_plateau_error)
+                        else:
+                            first_plateau_score = 0.0
+                    else:
+                        first_plateau_score = 0.0
+                    
+                    # Overall plateau fit
+                    plateau_fitness = 1.0 / (1.0 + bo_error)
+                    
+                    # Fitness for falling droplet
+                    fitness = (
+                        0.4 * equator_score +              # Equator point (40%)
+                        0.3 * first_plateau_score +        # First plateau point (30%)
+                        0.2 * plateau_fitness +            # Overall fit (20%)
+                        0.1 / (1.0 + rmse_mm_test * 100)  # Circle quality (10%)
+                    )
+                    
+                    metrics = {
+                        "sigma": f"{sigma_test:.2f}",
+                        "canny1": canny1_test,
+                        "plateau": plateau_len_test,
+                        "Bo": f"{bo_test:.4f}",
+                        "equator_score": f"{equator_score:.4f}",
+                        "first_plateau_score": f"{first_plateau_score:.4f}",
+                    }
+                    
+                    return fitness, metrics, None
+                
+                # Run falling droplet GA
+                outdir_ga = self.ui_params.get("output_dir", "droppy_out")
+                
+                ga_falling = YLCurveFallingDroplet(
+                    initial_sigma=self.inputs.sigma,
+                    initial_canny1=self.inputs.canny1,
+                    initial_plateau_length=self.ui_params["plateau_width"],
+                    initial_low_clarity=self.ui_params.get("low_clarity_ratio", 0.1),
+                    initial_high_clarity=self.ui_params.get("high_clarity_ratio", 0.01),
+                    initial_bo=0.2,
+                    pop_size=self.ui_params.get("ga_population", 8),
+                    max_generations=self.ui_params.get("ga_generations", 30),
+                )
+                
+                ga_best_params, ga_fitness_history = ga_falling.evolve(evaluate_params_falling, outdir_ga + "/ga_generations")
+                ga_enabled_final = True
+                
+            # If GA was enabled, use its Bo result; otherwise use averaged Bo_low/Bo_high
+            if ga_enabled_final and ga_best_params is not None:
+                Bo_low = float(ga_best_params['bo'])
+                Bo_high = float(ga_best_params['bo'])
+                Bo_final = float(ga_best_params['bo'])
+            else:
+                Bo_low = float(result_low["best_Bo"])
+                Bo_high = float(result_high["best_Bo"])
+                Bo_final = 0.5 * (Bo_low + Bo_high)
             
             best = result_high
+            
+            # For rising droplets, check if YL curve intercepts needle
+            yl_intercepts_needle = False
+            yl_distance_to_needle = float('nan')
+            
+            if self.inputs.droplet_type == "rising" and np.isfinite(Bo_final):
+                r_star_pred, z_star_pred = integrate_young_laplace(Bo_final, "rising", z_stop=3.0)
+                intercepts, distance = check_yl_needle_interception(
+                    r_star_pred, z_star_pred, R0_len_mm, tip, ex, ey, lensing_factor, mm_per_px
+                )
+                yl_intercepts_needle = intercepts
+                yl_distance_to_needle = distance
+                
+                # If doesn't intercept, suggest auto-correction
+                if not intercepts and distance > 3.0:
+                    pass
             
             self.finished.emit({
                 "success": True,
@@ -606,6 +1569,14 @@ class ProcessingThread(QThread):
                 "rmse_thresh": best["rmse_thresh"],
                 "rmse_med_mm": best["rmse_med_mm"],
                 "rmse_thresh_mm": best["rmse_thresh_mm"],
+                "yl_intercepts_needle": yl_intercepts_needle,
+                "yl_distance_to_needle": yl_distance_to_needle,
+                "ga_enabled": ga_enabled_final,
+                "ga_best_params": ga_best_params,
+                "droplet_type": self.inputs.droplet_type,
+                "direction": self.inputs.direction,
+                "needle_left_xy": self.inputs.needle_left_xy,
+                "needle_right_xy": self.inputs.needle_right_xy,
                 "plateau_mask": best["plateau_mask"],
                 "plateau_length": best["plateau_length"],
                 "img": img,
@@ -690,7 +1661,7 @@ class MainWindow(QMainWindow):
         minimize_btn.clicked.connect(self.showMinimized)
         title_layout.addWidget(minimize_btn)
         
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton(" ✕ ")
         close_btn.setMaximumWidth(30)
         close_btn.setMaximumHeight(25)
         close_btn.setToolTip("Close")
@@ -724,7 +1695,29 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(tabs)
         
         run_layout = QHBoxLayout()
-        self.run_btn = QPushButton("▶ RUN ANALYSIS")
+        
+        # GA controls (checkbox + population/generations)
+        self.use_genetic_algorithm = QCheckBox("Use GA Optimization")
+        self.use_genetic_algorithm.setChecked(False)
+        
+        self.ga_population = QSpinBox()
+        self.ga_population.setRange(4, 20)
+        self.ga_population.setValue(8)
+        self.ga_population.setMaximumWidth(60)
+        
+        self.ga_generations = QSpinBox()
+        self.ga_generations.setRange(5, 100)
+        self.ga_generations.setValue(30)
+        self.ga_generations.setMaximumWidth(60)
+        
+        run_layout.addWidget(self.use_genetic_algorithm)
+        run_layout.addWidget(QLabel("Pop:"))
+        run_layout.addWidget(self.ga_population)
+        run_layout.addWidget(QLabel("Gen:"))
+        run_layout.addWidget(self.ga_generations)
+        run_layout.addStretch()
+        
+        self.run_btn = QPushButton("RUN ANALYSIS")
         self.run_btn.setStyleSheet("""
             QPushButton { background-color: #2ecc71; color: white; font-weight: bold;
                 padding: 12px; font-size: 14px; border-radius: 5px; }
@@ -766,8 +1759,6 @@ class MainWindow(QMainWindow):
         """)
         save_settings_btn.clicked.connect(self.on_save_settings)
         
-        run_layout.addWidget(save_settings_btn)
-        run_layout.addStretch()
         run_layout.addWidget(self.run_btn)
         run_layout.addStretch()
         
@@ -803,7 +1794,17 @@ class MainWindow(QMainWindow):
             }
         """)
         help_btn.clicked.connect(self.on_help)
-        run_layout.addWidget(help_btn)
+        
+        # Group Save Settings and Help buttons together on the right
+        right_buttons_layout = QHBoxLayout()
+        right_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        right_buttons_layout.setSpacing(5)
+        right_buttons_layout.addWidget(save_settings_btn)
+        right_buttons_layout.addWidget(help_btn)
+        
+        right_buttons_widget = QWidget()
+        right_buttons_widget.setLayout(right_buttons_layout)
+        run_layout.addWidget(right_buttons_widget)
         
         main_layout.addLayout(run_layout)
         
@@ -1028,8 +2029,10 @@ class MainWindow(QMainWindow):
         clarity_layout.addRow("High Clarity:", self.high_clarity_ratio)
         
         clarity_group.setLayout(clarity_layout)
+        
         layout.addWidget(clarity_group)
         
+
         layout.addStretch()
         widget.setLayout(layout)
         return widget
@@ -1368,7 +2371,6 @@ class MainWindow(QMainWindow):
                 
             except Exception as e:
                 # Failed to load, use defaults
-                print(f"Failed to load settings from {conf_path}: {str(e)}")
                 self.output_dir.setText(default_outdir)
         else:
             # No config file, use defaults
@@ -1410,6 +2412,9 @@ class MainWindow(QMainWindow):
                 "lensing_factor": self.lensing_factor.value(),
                 "low_clarity_ratio": self.low_clarity_ratio.value(),
                 "high_clarity_ratio": self.high_clarity_ratio.value(),
+                "use_genetic_algorithm": self.use_genetic_algorithm.isChecked(),
+                "ga_population": self.ga_population.value(),
+                "ga_generations": self.ga_generations.value(),
             }
             
             self.run_btn.setEnabled(False)
@@ -1522,6 +2527,18 @@ class MainWindow(QMainWindow):
                 if 0 <= p_roi[0] < rw and 0 <= p_roi[1] < rh:
                     cv2.circle(viz_img, p_roi, 6, (128, 128, 128), -1)
             
+            # For rising droplets, add needle corner marker in traversal direction
+            droplet_type = result.get("droplet_type", "pendant")
+            direction = result.get("direction", 1)
+            
+            if droplet_type == "rising":
+                # Mark the LEFT end of the needle (the corner where droplet contacts)
+                # needle_left_xy is the left edge of the needle
+                needle_corner_screen = np.array(result.get("needle_left_xy", [0, 0]), dtype=np.float64)
+                nc_roi = (int(needle_corner_screen[0] - x0), int(needle_corner_screen[1] - y0))
+                if 0 <= nc_roi[0] < rw and 0 <= nc_roi[1] < rh:
+                    cv2.circle(viz_img, nc_roi, 5, (0, 255, 255), -1)  # Cyan - very visible
+            
             # Save files
             cv2.imwrite(os.path.join(outdir, "result_yl_overlay.png"), viz_img)
             cv2.imwrite(os.path.join(outdir, "edges.png"), cv2.cvtColor(edges_roi, cv2.COLOR_GRAY2BGR))
@@ -1540,13 +2557,21 @@ class MainWindow(QMainWindow):
                 "rmse_threshold_mm": result["rmse_thresh_mm"],
                 "rmse_median_px": result["rmse_med"],
                 "rmse_threshold_px": result["rmse_thresh"],
+                "yl_intercepts_needle": bool(result["yl_intercepts_needle"]),
+                "yl_distance_to_needle": float(result["yl_distance_to_needle"]),
+                "ga_enabled": bool(result["ga_enabled"]),
+                "ga_best_params": {
+                    "sigma": float(result["ga_best_params"]["sigma"]),
+                    "canny1": int(result["ga_best_params"]["canny1"]),
+                    "plateau_length": int(result["ga_best_params"]["plateau_length"]),
+                } if result["ga_best_params"] else None,
             }
             with open(os.path.join(outdir, "summary.json"), "w") as f:
                 json.dump(summary, f, indent=2)
             
             # Display results
             self.display_results(viz_img, edges_roi, summary, outdir)
-            self.status_label.setText("✓ Analysis complete!")
+            self.status_label.setText("Analysis complete!")
             
             QMessageBox.information(
                 self, "Success",
@@ -1570,6 +2595,17 @@ class MainWindow(QMainWindow):
         qt_viz = QImage(viz_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
         qt_edges = QImage(edges_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
         
+        ga_params_str = ""
+        if summary.get("ga_enabled", False) and summary.get("ga_best_params"):
+            params = summary["ga_best_params"]
+            ga_params_str = f"""
+GENETIC ALGORITHM OPTIMIZATION:
+  Status:            ENABLED & COMPLETED
+  Optimized sigma:   {params.get('sigma', 'N/A'):.3f}
+  Optimized Canny1:  {params.get('canny1', 'N/A')}
+  Optimized Plateau: {params.get('plateau_length', 'N/A')} points
+"""
+        
         self.results_text.setText(f"""
 
 RESULTS
@@ -1584,6 +2620,11 @@ BOND NUMBERS:
   • High Clarity:  {summary['Bo_high']:.6f}
   • Averaged:      {summary['Bo_final']:.6f}
 
+YL CURVE VALIDATION (Rising Droplets):
+  Intercepts Needle: {('YES' if summary['yl_intercepts_needle'] else 'NO')}
+  Distance to Needle: {summary['yl_distance_to_needle']:.2f} px
+  Status: {'Good fit' if summary['yl_intercepts_needle'] else 'Check parameters'}
+
 RMS ERROR (Circle Detection Quality):
   • Median RMSE:       {summary['rmse_median_mm']:.6f} mm
   • RMSE Threshold:    {summary['rmse_threshold_mm']:.6f} mm
@@ -1595,7 +2636,7 @@ PLATEAU:
 
 LENSING:
   • Factor:            {summary['lensing_factor']:.3f}
-
+{ga_params_str}
 Location: {outdir}
 """)
         
