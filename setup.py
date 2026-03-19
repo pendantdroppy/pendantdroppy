@@ -9,7 +9,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 def create_desktop_file():
     """Create a .desktop file for Linux applications menu."""
     desktop_content = """[Desktop Entry]
-Version=1.0.3
+Version=1.1.0
 Type=Application
 Name=droppy
 Comment=Tensiometry software for droplet shape analysis
@@ -40,7 +40,7 @@ Keywords=droplet;tensiometry;analysis;young-laplace;pendant;
 
 setup(
     name="pendantdroppy",
-    version="1.0.3",
+    version="1.1.0",
     author="Josh",
     author_email="c0cz89m5t@mozmail.com",
     description="pendantdroppy - Tensiometry software for droplet shape analysis using Young-Laplace fitting",
@@ -77,9 +77,8 @@ setup(
             "droppy=droppy:main",
         ],
     },
-    include_package_data=True,
     package_data={
-        ".": ["*.conf", "*.png", "*.svg"],  # Include config and icon files in root
+        "": ["*.conf", "*.png", "*.svg"],  # Include config and icon files in root
     },
     zip_safe=False,
     keywords="droplet tensiometry analysis young-laplace bond-number surface-tension pendant",
